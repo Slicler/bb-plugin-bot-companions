@@ -187,6 +187,8 @@ const EYES = {
     surprised: ['###', '#.#', '###'],
     focused: ['###', '###'],
     up: ['##', '##'],
+    x: ['#.#', '.#.', '#.#'],
+    worried: ['#..#', '.##.'],
 };
 const MOUTHS = {
     closed: ['####'],
@@ -194,6 +196,7 @@ const MOUTHS = {
     open: ['.##.', '####', '####', '.##.'],
     o: ['.#.', '#.#', '.#.'],
     smile: ['#..#', '.##.'],
+    frown: ['.##.', '#..#'],
 };
 /** The bot's resting eyes, from its avatar shape. */
 function baseEyes(bot) {
@@ -250,7 +253,17 @@ function drawFace(ctx, bot, body, face) {
             dy = -0.8 * U;
         else
             dy = 1.2 * U;
+        if ((face.stress ?? 0) >= 2)
+            eyes = 'worried';
     }
+    else if (face.mood === 'needs')
+        eyes = 'wide';
+    else if (face.mood === 'done')
+        eyes = 'happy';
+    else if (face.mood === 'failed')
+        eyes = 'x';
+    else if (face.mood === 'sleeping')
+        eyes = 'blink';
     else if (face.mood === 'watching')
         eyes = 'focused';
     else if (face.mood === 'talking')
@@ -289,14 +302,27 @@ function drawFace(ctx, bot, body, face) {
     pattern(rows, at.x + 12 * ek * wide + dx, at.y + lift - 2 * k + dy, mirrorRight);
     // Mouth: talking flaps through three shapes; happy idle smiles.
     let mouth = null;
+    const yawning = face.mood === 'idle' && (face.context ?? 0) >= 0.85 && face.now % 9000 < 1500;
     if (face.mood === 'talking')
         mouth = face.talk > 0.66 ? 'open' : face.talk > 0.3 ? 'small' : 'closed';
+    else if (face.mood === 'needs')
+        mouth = 'o';
+    else if (face.mood === 'done' || face.relief)
+        mouth = 'smile';
+    else if (face.mood === 'failed' || (face.mood === 'working' && (face.stress ?? 0) >= 2))
+        mouth = 'frown';
+    else if (face.chewing)
+        mouth = Math.floor(face.now / 110) % 2 ? 'open' : 'small';
+    else if (yawning)
+        mouth = 'o';
     else if (face.mood === 'idle' && face.expr === 'happy')
         mouth = 'smile';
     if (mouth)
         pattern(MOUTHS[mouth], at.x + dx * 0.4, at.y + lift + 11 * k + dy * 0.3);
-    if (face.mood === 'working' && face.work)
-        drawWork(ctx, face.work, at.x + 52 * k, body.bbox().top - 44 * k + Math.sin(face.now / 650) * 3 * k, U * 2, face.now);
+    drawExtras(ctx, bot, body, face, U, k, at.x, at.y + lift - 2 * k, 12 * ek * wide);
+    const prop = face.mood === 'working' ? face.work ?? null : face.mood === 'needs' ? 'ask' : face.mood === 'done' ? 'check' : face.mood === 'sleeping' ? 'sleep' : null;
+    if (prop)
+        drawWork(ctx, prop, at.x + 52 * k, body.bbox().top - 44 * k + Math.sin(face.now / 650) * 3 * k, U * 2, face.now);
     // Thinking: a cloud-shaped thought bubble that bobs, with dots filling in.
     if (face.mood === 'thinking') {
         const top = body.bbox().top;
@@ -400,6 +426,36 @@ function drawWork(ctx, work, cx, cy, C, now) {
         const end = Math.min(6, (t % 7) + 1);
         shape(['.#', '#.'], ox + (1 + end) * C, oy + (1 + row * 2 - 1) * C); // the pencil tip
     }
+    else if (work === 'ask') {
+        // Needs you: a flashing question mark.
+        const { ox, oy } = origin(7, 9);
+        ctx.fillStyle = tick(260) % 2 ? PAPER : '#ffd166';
+        shape(Array(9).fill('#######'), ox, oy);
+        ctx.fillStyle = INK;
+        shape(['.###.', '#...#', '....#', '...#.', '..#..', '.....', '..#..'], ox + C, oy + C);
+    }
+    else if (work === 'check') {
+        const { ox, oy } = origin(7, 5);
+        ctx.fillStyle = PAPER;
+        shape(Array(5).fill('#######'), ox, oy);
+        ctx.fillStyle = '#2f9e6e';
+        shape(['.....#.', '....##.', '#..##..', '.###...', '..#....'], ox, oy);
+    }
+    else if (work === 'sleep') {
+        // Three z's light up in turn.
+        const { ox, oy } = origin(9, 7);
+        const lit = tick(500) % 4;
+        [
+            { c: 0, r: 4, big: false },
+            { c: 3, r: 2, big: false },
+            { c: 5, r: 0, big: true },
+        ].forEach((z, n) => {
+            ctx.fillStyle = PAPER;
+            ctx.globalAlpha = n < lit ? 1 : 0.25;
+            shape(z.big ? ['####', '..#.', '.#..', '####'] : ['###', '.#.', '###'], ox + z.c * C, oy + z.r * C);
+        });
+        ctx.globalAlpha = 1;
+    }
     else {
         const { ox, oy } = origin(7, 7);
         ctx.fillStyle = PAPER;
@@ -407,6 +463,163 @@ function drawWork(ctx, work, cx, cy, C, now) {
             ? ['..#.#..', '.#####.', '##...##', '.#...#.', '##...##', '.#####.', '..#.#..']
             : ['#.....#', '.#####.', '.#...#.', '.#...#.', '.#...#.', '.#####.', '#.....#'], ox, oy);
     }
+}
+// ── Reactions, accessories and little friends ───────────────────────────
+function kit(ctx) {
+    const scale = ctx.getTransform().a;
+    const snap = (n) => Math.round(n * scale) / scale;
+    const rect = (x, y, w, h) => ctx.fillRect(snap(x), snap(y), snap(x + w) - snap(x), snap(y + h) - snap(y));
+    const rows = (r, ox, oy, u) => r.forEach((row, ry) => [...row].forEach((ch, cx) => ch === '#' && rect(ox + cx * u, oy + ry * u, u, u)));
+    return { rect, rows };
+}
+/** A small signature accessory, chosen from the bot's name (or its id for the rest). */
+function accessoryFor(bot) {
+    const n = bot.name.toLowerCase();
+    if (/architect|engineer|build/.test(n))
+        return 'hardhat';
+    if (/coach|business/.test(n))
+        return 'tie';
+    if (/remind|alarm|clock/.test(n))
+        return 'bell';
+    if (/design|art|creative/.test(n))
+        return 'beret';
+    if (/studio|music|audio|video/.test(n))
+        return 'headphones';
+    if (/manager|admin|ops/.test(n))
+        return 'glasses';
+    let h = 0;
+    for (const c of bot.id)
+        h = (h * 31 + c.charCodeAt(0)) >>> 0;
+    return ['antenna', 'sprout', 'bow'][h % 3];
+}
+function drawExtras(ctx, bot, body, face, U, k, ax, eyeY, eyeX) {
+    const { rect, rows } = kit(ctx);
+    const b = body.bbox();
+    const now = face.now;
+    const stress = face.stress ?? 0;
+    // Sweat drops while commands keep failing.
+    if (stress >= 1 || face.mood === 'failed') {
+        const n = Math.max(1, Math.min(3, stress));
+        for (let i = 0; i < n; i++) {
+            const fall = ((now / 150 + i * 4) % 10) * U * 0.55;
+            ctx.fillStyle = '#7cc7ff';
+            rows(['.#.', '###', '###'], ax + (24 + i * 9) * k, b.top + 6 * k + fall, U * 0.8);
+        }
+    }
+    // Sparkles around a bot that just finished.
+    if (face.mood === 'done') {
+        for (let i = 0; i < 6; i++) {
+            const a = (i / 6) * Math.PI * 2 + now / 900;
+            const r = (50 + Math.sin(now / 300 + i) * 6) * k;
+            const x = ax + Math.cos(a) * r;
+            const y = eyeY + Math.sin(a) * r * 0.8;
+            const big = (Math.floor(now / 160) + i) % 3 !== 0;
+            ctx.fillStyle = INK;
+            ctx.globalAlpha = 0.45;
+            rows(big ? ['.#.', '###', '.#.'] : ['#'], x - U * 0.4, y - U * 0.4, U * 0.9);
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = '#ffcf33';
+            rows(big ? ['.#.', '###', '.#.'] : ['#'], x - U * 1.35, y - U * 1.35, U * 0.9);
+        }
+    }
+    // Context meter: a little stack of blocks that fills, amber then red.
+    const used = face.context ?? 0;
+    if (used >= 0.5 && !body.held) {
+        const lit = Math.min(5, Math.ceil(used * 5));
+        const hot = used >= 0.9 ? '#e8483f' : used >= 0.7 ? '#f2a63a' : '#7ccf9a';
+        const x = b.left - 16 * k;
+        for (let i = 0; i < 5; i++) {
+            const y = b.bottom - (i + 1) * U * 1.7;
+            ctx.fillStyle = INK;
+            rect(x - 2, y - 2, U * 2 + 4, U * 1.4 + 4);
+            ctx.fillStyle = i < lit ? hot : 'rgba(236, 242, 237, 0.3)';
+            rect(x, y, U * 2, U * 1.4);
+        }
+    }
+    // Queued messages wait beside the bot as little blocks; it nibbles them away.
+    const queued = Math.min(6, face.queued ?? 0);
+    for (let i = 0; i < queued; i++) {
+        const bob = Math.abs(Math.sin(now / 260 + i * 0.9)) * U * 0.9;
+        const x = b.right + 10 * k + i * (U * 2.8);
+        const y = b.bottom - U * 2.4 - bob;
+        ctx.fillStyle = INK;
+        rect(x, y, U * 2.4, U * 2.4);
+        ctx.fillStyle = PAPER;
+        rect(x + U * 0.5, y + U * 0.5, U * 1.4, U * 1.4);
+    }
+    // Signature accessory.
+    if (body.held)
+        return;
+    const A = U * 1.6;
+    const top = b.top;
+    switch (accessoryFor(bot)) {
+        case 'hardhat':
+            ctx.fillStyle = '#f2c230';
+            rows(['..###..', '.#####.', '#######'], ax - 3.5 * A, top - 2.4 * A, A);
+            break;
+        case 'beret':
+            ctx.fillStyle = '#6b4ca8';
+            rows(['...##..', '.#####.', '#######', '.#####.'], ax - 3 * A, top - 3 * A, A);
+            break;
+        case 'bell': {
+            const ring = Math.sin(now / 110) * (Math.floor(now / 3000) % 2 ? A * 0.5 : 0);
+            ctx.fillStyle = '#e0b23a';
+            rows(['..#..', '.###.', '.###.', '#####', '..#..'], ax - 2.5 * A + ring, top - 4.4 * A, A);
+            break;
+        }
+        case 'tie':
+            ctx.fillStyle = '#b83232';
+            rows(['###', '.#.', '###', '###', '.#.'], ax - 1.5 * A, eyeY + 12 * k, A);
+            break;
+        case 'headphones': {
+            // Ear cups with a short band over each, so it fits narrow and wide bodies alike.
+            ctx.fillStyle = '#3a3f3d';
+            const cupTop = eyeY - 1.2 * A;
+            for (const [x, dir] of [[b.left, -1], [b.right, 1]]) {
+                rect(x - (dir < 0 ? 0.9 : 0.7) * A, cupTop, 1.6 * A, 3.2 * A);
+                rect(x - (dir < 0 ? 0.3 : 0.1) * A, cupTop - 1.2 * A, 0.6 * A + 1, 1.3 * A);
+            }
+            break;
+        }
+        case 'glasses': {
+            const u = U * 1.05;
+            ctx.fillStyle = INK;
+            for (const sx of [-1, 1])
+                rows(['#######', '#.....#', '#.....#', '#######'], ax + sx * eyeX - 3.5 * u, eyeY - 2 * u, u);
+            rect(ax - eyeX + 3.5 * u, eyeY - 1.2 * u, 2 * eyeX - 7 * u, u * 0.8);
+            break;
+        }
+        case 'antenna':
+            ctx.fillStyle = INK;
+            rect(ax - A * 0.4, top - 2.8 * A, A * 0.8, 2.8 * A);
+            ctx.fillStyle = Math.floor(now / 600) % 2 ? '#ffd166' : '#e8483f';
+            rect(ax - A, top - 4.2 * A, 2 * A, 1.6 * A);
+            break;
+        case 'sprout':
+            ctx.fillStyle = '#3fae5a';
+            rows(['##.##', '.###.', '..#..', '..#..'], ax - 2.5 * A, top - 3.6 * A, A);
+            break;
+        case 'bow':
+            ctx.fillStyle = '#ff7aa8';
+            rows(['##.##', '#####', '##.##'], ax + 6 * k, top - 1.6 * A, A);
+            break;
+    }
+}
+/** A small copy of a bot, for visitors and helpers standing beside the companion. */
+function drawMini(ctx, x, baseY, shape, color, k, now, phase, working = false) {
+    const { rect } = kit(ctx);
+    const s = 3.3 * k;
+    const hop = working ? Math.abs(Math.sin(now / 170 + phase)) * 4 * k : Math.max(0, Math.sin(now / 900 + phase)) ** 6 * 3 * k;
+    const x0 = x - 6 * s;
+    const y0 = baseY - 11 * s - hop;
+    ctx.fillStyle = color;
+    for (let y = 0; y < 12; y++)
+        for (let c = 0; c < 12; c++)
+            if (shapeDistance(shape, c - 5.5, y - 5.5, 0, 0) <= 0)
+                rect(x0 + c * s, y0 + y * s, s, s);
+    ctx.fillStyle = '#101713';
+    rect(x0 + 4 * s, y0 + 5.5 * s, s, s);
+    rect(x0 + 7 * s, y0 + 5.5 * s, s, s);
 }
 
 // A 2D soft body for one companion, plus the bits it sheds.
@@ -996,27 +1209,52 @@ function collide(p, world, r) {
 }
 
 const CELLS = [
-  ['idle', null, 'Idle'], ['watching', null, 'Watching you type'], ['thinking', null, 'Thinking'], ['talking', null, 'Talking'],
-  ['working', 'run', 'Running a command'], ['working', 'read', 'Reading a file'], ['working', 'search', 'Searching files'], ['working', 'web', 'Searching the web'],
-  ['working', 'edit', 'Editing a file'], ['working', 'tool', 'Using another tool'], ['held', null, 'Picked up'],
+  { label: 'Idle', mood: 'idle', name: 'Pip' },
+  { label: 'Watching you type', mood: 'watching', name: 'Pip' },
+  { label: 'Thinking', mood: 'thinking', name: 'Pip' },
+  { label: 'Talking', mood: 'talking', name: 'Pip' },
+  { label: 'Picked up', mood: 'held', name: 'Pip' },
+  { label: 'Running a command', mood: 'working', work: 'run', name: 'Pip' },
+  { label: 'Reading a file', mood: 'working', work: 'read', name: 'Pip' },
+  { label: 'Searching files', mood: 'working', work: 'search', name: 'Pip' },
+  { label: 'Searching the web', mood: 'working', work: 'web', name: 'Pip' },
+  { label: 'Editing a file', mood: 'working', work: 'edit', name: 'Pip' },
+  { label: 'Using another tool', mood: 'working', work: 'tool', name: 'Pip' },
+  { label: 'Needs you (a question or approval)', mood: 'needs', name: 'Pip' },
+  { label: 'Finished', mood: 'done', name: 'Pip' },
+  { label: 'Run failed', mood: 'failed', name: 'Pip' },
+  { label: 'Commands keep failing', mood: 'working', work: 'run', stress: 2, name: 'Pip' },
+  { label: 'Phew, a command passed', mood: 'working', work: 'run', relief: true, name: 'Pip' },
+  { label: 'Context nearly full (yawns)', mood: 'idle', context: 0.95, name: 'Pip' },
+  { label: 'Context filling up', mood: 'thinking', context: 0.72, name: 'Pip' },
+  { label: 'Messages queued (nibbles them)', mood: 'thinking', queued: 4, chew: true, name: 'Pip' },
+  { label: 'Asleep', mood: 'sleeping', name: 'Pip' },
+  { label: 'Visitors and helpers join in', mood: 'thinking', minis: true, name: 'Pip' },
+  { label: 'BB Architect: hard hat', mood: 'idle', name: 'BB Architect' },
+  { label: 'Business Coach: tie', mood: 'idle', name: 'Business Coach' },
+  { label: 'Reminder: bell', mood: 'idle', name: 'Reminder' },
+  { label: 'Tuthill Design: beret', mood: 'idle', name: 'Tuthill Design' },
+  { label: 'Studio C: headphones', mood: 'idle', name: 'Studio C' },
+  { label: 'S2P Manager: glasses', mood: 'idle', name: 'S2P Manager' },
+  { label: 'Others: antenna, sprout or bow', mood: 'idle', name: 'Zed' },
 ];
 const SHAPES = ['blob', 'capsule', 'cloud', 'round', 'triangle', 'squircle', 'hexagon'];
 const COLORS = ['#f08a24', '#2f9e6e', '#e8483f', '#e44f67', '#5b8def', '#9b6bd6', '#d1a62b'];
 const W = 280, H = 300, dpr = window.devicePixelRatio || 1;
 const grid = document.getElementById('grid');
-const actors = CELLS.map(([mood, work, label], i) => {
+const actors = CELLS.map((c, i) => {
   const wrap = document.createElement('figure');
   const cv = document.createElement('canvas');
   cv.width = W * dpr; cv.height = H * dpr; cv.style.width = W + 'px'; cv.style.height = H + 'px';
-  const cap = document.createElement('figcaption'); cap.textContent = label;
+  const cap = document.createElement('figcaption'); cap.textContent = c.label;
   wrap.append(cv, cap); grid.append(wrap);
   const shape = SHAPES[i % SHAPES.length], color = COLORS[i % COLORS.length];
-  const bot = { name: label, avatar: { shape, color, motion: 'playful', expression: 'neutral' } };
+  const bot = { id: 'bot_' + c.name, name: c.name, avatar: { shape, color, motion: 'playful', expression: 'neutral' } };
   const tune = { gravity: 1400, softness: shape === 'cloud' ? 0.85 : shape === 'triangle' ? 0.55 : 0.7, firmness: 0.3, stretch: 0.5, friction: 0.5, bounce: 0, tearDistance: 30 };
   const body = new SoftBody(restParticles(shape, 11.5, 1), { x: W / 2, y: H - 90 }, 11.5, tune);
   const world = { bounds: { left: 4, top: 4, right: W - 4, bottom: H - 4 }, solids: [] };
-  if (mood === 'held') { body.grab(W / 2, H - 90); body.moveHand(W / 2, 70); }
-  return { mood, work, bot, body, world, ctx: cv.getContext('2d'), acc: 0 };
+  if (c.mood === 'held') { body.grab(W / 2, H - 90); body.moveHand(W / 2, 70); }
+  return { ...c, bot, body, world, ctx: cv.getContext('2d'), acc: 0, shape, color, born: performance.now() };
 });
 let last = performance.now();
 function frame(now) {
@@ -1026,12 +1264,27 @@ function frame(now) {
     a.acc = Math.min(a.acc + dt, STEP * 8);
     while (a.acc >= STEP) { a.body.step(STEP, a.world); a.acc -= STEP; }
     const talk = a.mood === 'talking' ? Math.min(1, Math.max(0, Math.sin(now / 85) * 0.6 + Math.sin(now / 211) * 0.5 + 0.15)) : 0;
-    a.body.restScale = 1 + 0.016 * Math.sin(now / 950) + talk * 0.05 + (a.mood === 'working' ? 0.018 * Math.sin(now / 130) : 0);
+    let scale = 1 + 0.016 * Math.sin(now / 950) + talk * 0.05 + (a.mood === 'working' ? 0.018 * Math.sin(now / 130) : 0);
+    if (a.mood === 'failed') scale *= 0.94;
+    if (a.mood === 'sleeping') scale = 1 + 0.025 * Math.sin(now / 1500);
+    a.body.restScale = scale;
+    if (a.mood === 'needs' && a.body.grounded && now > (a.hopAt || 0)) { a.body.impulse(0, -260); a.hopAt = now + 1500; }
     const c = a.ctx;
     c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, W * dpr, H * dpr);
     c.setTransform(dpr, 0, 0, dpr, 0, 0); c.imageSmoothingEnabled = false;
-    drawBody(c, a.body, a.bot.avatar.color, []);
-    drawFace(c, a.bot, a.body, { mood: a.mood, expr: 'base', gaze: a.mood === 'watching' ? { x: W - 20, y: H - 40 } : null, talk, now, work: a.work });
+    drawBody(c, a.body, a.color, []);
+    drawFace(c, a.bot, a.body, {
+      mood: a.mood, expr: 'base', gaze: a.mood === 'watching' ? { x: W - 20, y: H - 40 } : null, talk, now,
+      work: a.work, stress: a.stress || 0, relief: !!a.relief, context: a.context ?? null,
+      queued: a.queued ? Math.max(1, a.queued - (a.chew ? Math.floor(now / 2500) % 4 : 0)) : 0,
+      chewing: !!a.chew && now % 2500 < 800,
+    });
+    if (a.minis) {
+      const baseY = H - 20;
+      drawMini(c, W - 40, baseY, 'round', '#5b8def', 1, now, 0, true);
+      drawMini(c, W - 70, baseY, 'triangle', '#e44f67', 1, now, 1.7, true);
+      drawMini(c, 40, baseY, a.shape, a.color, 1, now, 2.3, true);
+    }
   }
 }
 requestAnimationFrame(frame);
