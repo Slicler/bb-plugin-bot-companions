@@ -1,0 +1,16 @@
+.bc-toggle {display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:0;background:transparent;border-radius:6px;cursor:pointer;padding:0}
+.bc-toggle:hover{background:var(--muted)}
+.bc-toggle img{width:28px;height:28px;image-rendering:pixelated}
+.bc-actor{transition:none!important;position:fixed;left:0;top:0;display:none;width:112.5px;height:112.5px;padding:0;border:0;background:transparent;z-index:35;cursor:grab;touch-action:none;user-select:none;outline-offset:3px;isolation:isolate}
+.bc-actor:active{cursor:grabbing}
+.bc-actor canvas{display:block;width:112.5px;height:112.5px;image-rendering:pixelated;pointer-events:none}
+.bc-shadow{display:none}
+.bc-bubble{position:absolute;bottom:calc(100% + 4px);left:50%;transform:translateX(-50%);font:11px ui-monospace,monospace;white-space:nowrap;background:var(--popover,#22352e);color:var(--popover-foreground,#fff1cc);border:1px solid var(--border,#5a7466);padding:3px 6px;border-radius:5px;opacity:0;pointer-events:none}
+.bc-bubble[data-visible=true],.bc-actor:hover .bc-bubble,.bc-actor:focus-visible .bc-bubble{opacity:1}
+
+.bc-trail{position:fixed;left:0;top:0;pointer-events:none;z-index:34;width:0;height:0;image-rendering:pixelated;will-change:transform;contain:strict}
+
+/* Bot characters off: freeze the sidebar avatars too. */
+html[data-bot-characters-off] .bot-avatar,
+html[data-bot-characters-off] .bot-avatar *,
+html[data-bot-characters-off] .bot-work-ring{animation:none!important}
