@@ -8,7 +8,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { definePluginApp, experimental_useSidebarThreads, useRpc } from '@get-bb/plugin-sdk/app';
-import type { Bot, rpcContract } from './server';
+import type { Bot, Work, rpcContract } from './server';
 import { sprite, drawBody, drawDrops, drawFace, restParticles, PIXEL, screenScale, view, type Expression, type Mood } from './sprites';
 import { SoftBody, type World } from './softbody';
 import './style.css';
@@ -250,6 +250,24 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
     let boxed: Element | null = null;
     const boxWatcher = new ResizeObserver(() => (nextMeasure = 0));
     let forced: string | null = null;
+    // What the agent is doing (running, reading, searching...), asked of the
+    // backend about once a second and only while the chat is working.
+    let work: { kind: Work | null; until: number } = { kind: null, until: 0 };
+    let asking = false;
+    const askWork = () => {
+      if (!busy.current || document.hidden || asking) return;
+      asking = true;
+      rpc.call('activity', { threadId }).then(
+        (v) => {
+          asking = false;
+          if (v.kind !== 'none') work = { kind: v.kind, until: performance.now() + 1100 };
+        },
+        () => {
+          asking = false;
+        },
+      );
+    };
+    const workTimer = setInterval(askWork, 800);
     // Watch the reply grow without reading the whole transcript: only the nodes
     // that were added or removed are measured, and only while the chat is working.
     const watcher = new MutationObserver((records) => {
@@ -365,15 +383,18 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
       }
 
       // Mood: what the chat (and you) are doing right now.
+      const working = busy.current && now < work.until;
       const mood: Mood = forced === 'thinking' || forced === 'talking' ? forced : body.held
         ? 'held'
-        : busy.current && now - grewAt < 600
-          ? 'talking'
-          : busy.current
-            ? 'thinking'
-            : now - typedAt < 1500
-              ? 'watching'
-              : 'idle';
+        : working
+          ? 'working'
+          : busy.current && now - grewAt < 600
+            ? 'talking'
+            : busy.current
+              ? 'thinking'
+              : now - typedAt < 1500
+                ? 'watching'
+                : 'idle';
       // Talking: a syllable rhythm (two beating waves) drives the mouth and
       // a little pulse through the body.
       const talk = mood === 'talking' ? Math.max(0, Math.sin(now / 85) * 0.6 + Math.sin(now / 211) * 0.5 + 0.15) : 0;
@@ -381,7 +402,7 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
       const breath = Math.sin(now / 950);
       body.restScale = still
         ? 1
-        : 1 + (mood === 'idle' || mood === 'watching' ? 0.01 : 0.016) * breath + Math.min(1, talk) * 0.05;
+        : 1 + (mood === 'idle' || mood === 'watching' ? 0.01 : 0.016) * breath + Math.min(1, talk) * 0.05 + (mood === 'working' ? 0.018 * Math.sin(now / 130) : 0);
       const v = body.velocity();
       const speed = Math.hypot(v.vx, v.vy);
       if (now < ui.greet) {
@@ -432,7 +453,7 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
       // Draw: drops, body, face — all on the same screen-fixed block grid.
       // Lively moments draw at up to 60 fps, quiet ones at 30; physics keeps
       // its fixed step either way.
-      lively = body.held || !body.grounded || body.drops.length > 0 || mood === 'talking' || ui.down || now < ui.greet;
+      lively = body.held || !body.grounded || body.drops.length > 0 || mood === 'talking' || mood === 'working' || ui.down || now < ui.greet;
       if (now - lastDraw >= (lively ? 15 : 32)) {
         lastDraw = now;
         const ratio = devicePixelRatio || 1;
@@ -441,7 +462,7 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
         drawDrops(r, body.drops, bot.avatar.color);
         drawBody(r, body, bot.avatar.color, world.solids);
         const gaze = mood === 'watching' ? caret : look;
-        drawFace(r, bot, body, { mood, expr: now < blinkUntil && mood !== 'held' ? 'blink' : expr, gaze, talk: Math.min(1, talk), now });
+        drawFace(r, bot, body, { mood, expr: now < blinkUntil && mood !== 'held' ? 'blink' : expr, gaze, talk: Math.min(1, talk), now, work: work.kind });
         // Only the companion's own area, clipped to the pane, in device pixels.
         const b = world.bounds;
         const L = Math.floor((Math.max(rec.left, b.left) * ratio) / TILE) * TILE;
@@ -496,6 +517,7 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
     raf = requestAnimationFrame(loop);
     return () => {
       cancelAnimationFrame(raf);
+      clearInterval(workTimer);
       watcher.disconnect();
       boxWatcher.disconnect();
       window.removeEventListener('pointermove', onLook);
@@ -504,7 +526,7 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
       canvas.remove();
       bodyRef.current = null;
     };
-  }, [bot, shown, off, threadId, scale]);
+  }, [rpc, bot, shown, off, threadId, scale]);
 
   if (!bot || off) return null;
   const ui = input.current;

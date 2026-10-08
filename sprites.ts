@@ -1,4 +1,4 @@
-import type { Bot } from './server';
+import type { Bot, Work } from './server';
 import type { Drop, SoftBody } from './softbody';
 export const SIZE=112.5;
 const BODY_UNIT_PX=9.375; // Original 6.25-unit silhouette × 1.5, independent of block pitch.
@@ -159,7 +159,7 @@ export function drawDrops(ctx: CanvasRenderingContext2D, drops: Drop[], color: s
 // fixed 3.125px unit so they stay the same size whatever the body does. Left
 // eye patterns are mirrored for the right eye.
 
-export type Mood = 'idle' | 'watching' | 'thinking' | 'talking' | 'held';
+export type Mood = 'idle' | 'watching' | 'thinking' | 'talking' | 'working' | 'held';
 export type Expression = 'base' | 'dot' | 'wide' | 'narrow' | 'happy' | 'blink' | 'lookL' | 'lookR' | 'lookUp' | 'surprised' | 'focused' | 'up';
 
 const EYES: Record<string, string[]> = {
@@ -194,6 +194,7 @@ export interface FaceState {
   gaze: { x: number; y: number } | null;
   talk: number; // 0..1 mouth openness
   now: number;
+  work?: Work | null; // what the agent is doing, while mood is 'working'
 }
 
 export function drawFace(ctx: CanvasRenderingContext2D, bot: Bot, body: SoftBody, face: FaceState) {
@@ -235,6 +236,14 @@ export function drawFace(ctx: CanvasRenderingContext2D, bot: Bot, body: SoftBody
     eyes = 'up';
     dx = 1.4 * U;
     dy = -1.6 * U;
+  } else if (face.mood === 'working') {
+    // Each kind of work gets its own look: scanning lines, darting about, or heads-down.
+    const w = face.work;
+    eyes = w === 'read' || w === 'search' ? 'dot' : 'focused';
+    if (w === 'read') dx = Math.sin(face.now / 260) * 1.8 * U;
+    else if (w === 'search') dx = (Math.floor(face.now / 330) % 3 - 1) * 1.8 * U;
+    else if (w === 'web') dy = -0.8 * U;
+    else dy = 1.2 * U;
   } else if (face.mood === 'watching') eyes = 'focused';
   else if (face.mood === 'talking') eyes = face.talk > 0.6 ? 'happy' : baseEyes(bot);
   if (face.expr === 'blink') eyes = 'blink';
@@ -272,6 +281,8 @@ export function drawFace(ctx: CanvasRenderingContext2D, bot: Bot, body: SoftBody
   else if (face.mood === 'idle' && face.expr === 'happy') mouth = 'smile';
   if (mouth) pattern(MOUTHS[mouth], at.x + dx * 0.4, at.y + lift + 11 * k + dy * 0.3);
 
+  if (face.mood === 'working' && face.work) drawWork(ctx, face.work, at.x + 52 * k, body.bbox().top - 44 * k + Math.sin(face.now / 650) * 3 * k, U * 2, face.now);
+
   // Thinking: a cloud-shaped thought bubble that bobs, with dots filling in.
   if (face.mood === 'thinking') {
     const top = body.bbox().top;
@@ -296,3 +307,90 @@ export function drawFace(ctx: CanvasRenderingContext2D, bot: Bot, body: SoftBody
   }
 }
 
+// ── Work props ──────────────────────────────────────────────────────────
+// A little animated prop floats beside the bot while it works: a terminal
+// for commands, a page for reading, a magnifier for searching, a globe for
+// the web, a page with a pencil for edits and a cog for other tools.
+const PAPER = 'rgba(236, 242, 237, 0.94)';
+const INK = '#101713';
+
+function drawWork(ctx: CanvasRenderingContext2D, work: Work, cx: number, cy: number, C: number, now: number) {
+  const scale = ctx.getTransform().a;
+  const snap = (n: number) => Math.round(n * scale) / scale;
+  // A grid prop is W×H cells centered on (cx, cy); cells are [col, row] pairs.
+  const cell = (ox: number, oy: number, c: number, r: number, w = 1) =>
+    ctx.fillRect(snap(ox + c * C), snap(oy + r * C), snap(ox + (c + w) * C) - snap(ox + c * C), snap(oy + (r + 1) * C) - snap(oy + r * C));
+  const shape = (rows: string[], ox: number, oy: number) =>
+    rows.forEach((row, r) => [...row].forEach((ch, c) => ch === '#' && cell(ox, oy, c, r)));
+  // Every prop sits on a dark panel, so it reads on light and dark themes alike.
+  const origin = (w: number, h: number, pad = 1) => {
+    const ox = cx - (w * C) / 2;
+    const oy = cy - (h * C) / 2;
+    ctx.fillStyle = 'rgba(16, 23, 19, 0.9)';
+    ctx.fillRect(snap(ox - pad * C), snap(oy - pad * C), snap(ox + (w + pad) * C) - snap(ox - pad * C), snap(oy + (h + pad) * C) - snap(oy - pad * C));
+    return { ox, oy };
+  };
+  const tick = (ms: number) => Math.floor(now / ms);
+
+  if (work === 'run') {
+    const { ox, oy } = origin(10, 7);
+    ctx.fillStyle = PAPER;
+    shape(Array(7).fill('##########'), ox, oy);
+    ctx.fillStyle = INK;
+    shape(['#.', '.#', '#.'], ox + C, oy + C); // the prompt
+    const a = 1 + (tick(170) % 5);
+    const b = 1 + ((tick(170) + 2) % 4);
+    cell(ox, oy, 4, 1, a); // output lines fill in
+    cell(ox, oy, 4, 3, b);
+    if (tick(380) % 2) cell(ox, oy, 1, 5, 2); // blinking cursor
+  } else if (work === 'read') {
+    const { ox, oy } = origin(8, 9);
+    ctx.fillStyle = PAPER;
+    shape(Array(9).fill('########'), ox, oy);
+    const lines = [6, 5, 6, 4];
+    const at = tick(360) % lines.length;
+    lines.forEach((len, i) => {
+      ctx.fillStyle = INK;
+      ctx.globalAlpha = i === at ? 1 : 0.3; // the line being read lights up
+      cell(ox, oy, 1, 1 + i * 2, len);
+    });
+    ctx.globalAlpha = 1;
+  } else if (work === 'search') {
+    const { ox, oy } = origin(11, 9, 0);
+    // The magnifier sweeps a small circle across the panel.
+    const sx = (2 + Math.cos(now / 420) * 1.8) * C;
+    const sy = (0.8 + Math.sin(now / 420) * 1.1) * C;
+    ctx.fillStyle = PAPER;
+    shape(['.###...', '#...#..', '#...#..', '#...#..', '.###...', '....#..', '.....#.'], ox + sx, oy + sy);
+  } else if (work === 'web') {
+    const { ox, oy } = origin(7, 7);
+    ctx.fillStyle = PAPER;
+    shape(['..###..', '.#####.', '#######', '#######', '#######', '.#####.', '..###..'], ox, oy);
+    ctx.fillStyle = INK;
+    const m = 1 + (tick(240) % 5); // a meridian rolls across the globe
+    for (let r = 1; r <= 5; r++) if (m > 1 && m < 5 ? true : r > 1 && r < 5) cell(ox, oy, m, r);
+    ctx.globalAlpha = 0.5;
+    cell(ox, oy, 0, 3, 7); // the equator
+    ctx.globalAlpha = 1;
+  } else if (work === 'edit') {
+    const { ox, oy } = origin(9, 7);
+    ctx.fillStyle = PAPER;
+    shape(Array(7).fill('#########'), ox, oy);
+    ctx.fillStyle = INK;
+    const t = tick(150) % 21; // three lines get written in turn
+    const row = Math.floor(t / 7);
+    for (let r = 0; r <= row; r++) cell(ox, oy, 1, 1 + r * 2, r < row ? 6 : Math.min(6, (t % 7) + 1));
+    const end = Math.min(6, (t % 7) + 1);
+    shape(['.#', '#.'], ox + (1 + end) * C, oy + (1 + row * 2 - 1) * C); // the pencil tip
+  } else {
+    const { ox, oy } = origin(7, 7);
+    ctx.fillStyle = PAPER;
+    shape(
+      tick(300) % 2
+        ? ['..#.#..', '.#####.', '##...##', '.#...#.', '##...##', '.#####.', '..#.#..']
+        : ['#.....#', '.#####.', '.#...#.', '.#...#.', '.#...#.', '.#####.', '#.....#'],
+      ox,
+      oy,
+    );
+  }
+}
