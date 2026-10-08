@@ -8,8 +8,8 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 import { definePluginApp, experimental_useSidebarThreads, useRpc } from '@get-bb/plugin-sdk/app';
-import type { Bot, rpcContract } from './server';
-import { sprite, drawBody, drawDrops, drawFace, restParticles, PIXEL, screenScale, view, type Expression, type Mood } from './sprites';
+import type { Bot, Friend, Work, rpcContract } from './server';
+import { sprite, drawBody, drawDrops, drawFace, drawMini, restParticles, PIXEL, screenScale, view, type Expression, type Mood } from './sprites';
 import { SoftBody, type World } from './softbody';
 import './style.css';
 
@@ -185,6 +185,15 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
   const status = threads.find((t) => t.id === threadId)?.status;
   const busy = useRef(false);
   busy.current = status === 'starting' || status === 'active';
+  // What the sidebar knows: a question waiting for you, sub-threads at work, who else is busy.
+  const info = useRef({ pending: false, helpers: 0, busyIds: new Set<string>() });
+  const isLive = (t: { status: string }) => t.status === 'starting' || t.status === 'active';
+  info.current = {
+    pending: !!threads.find((t) => t.id === threadId)?.hasPendingInteraction,
+    helpers: threads.filter((t) => t.parentThreadId === threadId && isLive(t)).length,
+    busyIds: new Set(threads.filter(isLive).map((t) => t.id)),
+  };
+  const friendsRef = useRef<Friend[]>([]);
 
   useEffect(() => {
     let live = true;
@@ -192,7 +201,15 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
       if (document.hidden) return;
       rpc.call('owner', { threadId, projectId }).then(
         (v) => live && setBot((old) => (JSON.stringify(old) === JSON.stringify(v) ? old : v)),
-        () => live && setBot(null),
+        () => {
+          // A failed lookup keeps the bot it already has; only a real "no owner" answer removes it.
+        },
+      );
+      rpc.call('bots', {}).then(
+        (v) => {
+          friendsRef.current = v;
+        },
+        () => {},
       );
     };
     refresh();
@@ -223,6 +240,8 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
     let place = '';
     let actorBox = '';
     let lastDraw = 0;
+    let lastWork = 0;
+    let lively = false;
     let raf = 0;
     let last = 0;
     let acc = 0;
@@ -240,8 +259,67 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
     let typedAt = 0;
     let caret: { x: number; y: number } | null = null;
     let grewAt = 0;
-    let textLength = 0;
     let watched: Element | null = null;
+    // The message box grows and shrinks as you click in and type: re-measure
+    // on the very next frame so the body never sits inside a box that moved.
+    let boxed: Element | null = null;
+    const boxWatcher = new ResizeObserver(() => (nextMeasure = 0));
+    let forced: string | null = null;
+    // What the agent is doing (running, reading, searching...), asked of the
+    // backend about once a second and only while the chat is working.
+    let work: { kind: Work | null; until: number } = { kind: null, until: 0 };
+    const live = { failed: 0, context: null as number | null, queued: 0 };
+    let outcome: { at: number; turn: 'ok' | 'failed' | 'interrupted' | 'none' } | null = null;
+    let asking = false;
+    const askWork = () => {
+      if (!busy.current || document.hidden || asking) return;
+      asking = true;
+      rpc.call('activity', { threadId }).then(
+        (v) => {
+          asking = false;
+          live.failed = v.failed;
+          live.queued = v.queued;
+          if (v.context !== null) live.context = v.context;
+          if (v.kind !== 'none') work = { kind: v.kind, until: performance.now() + 1100 };
+        },
+        () => {
+          asking = false;
+        },
+      );
+    };
+    const workTimer = setInterval(askWork, 800);
+    // Seed the context meter, which should show even before the next turn.
+    rpc.call('activity', { threadId }).then(
+      (v) => {
+        if (v.context !== null) live.context = v.context;
+      },
+      () => {},
+    );
+    let prevBusy = busy.current;
+    let prevMood: Mood = 'idle';
+    let lastActive = performance.now();
+    let wakeUntil = 0;
+    let nextHop = 0;
+    let nextShake = 0;
+    let lastStress = 0;
+    let reliefUntil = 0;
+    let lastQueued = 0;
+    let chewUntil = 0;
+    const arrived = new Map<string, number>();
+    // Watch the reply grow without reading the whole transcript: only the nodes
+    // that were added or removed are measured, and only while the chat is working.
+    const watcher = new MutationObserver((records) => {
+      if (!busy.current) return;
+      let grown = 0;
+      for (const m of records) {
+        if (m.type === 'characterData') grown += (m.target.nodeValue?.length ?? 0) - (m.oldValue?.length ?? 0);
+        else {
+          m.addedNodes.forEach((n) => (grown += n.textContent?.length ?? 0));
+          m.removedNodes.forEach((n) => (grown -= n.textContent?.length ?? 0));
+        }
+      }
+      if (grown > 2) grewAt = performance.now();
+    });
     const onType = (e: Event) => {
       const t = e.target instanceof Element ? e.target : null;
       const box = t?.closest('[data-promptbox]');
@@ -280,6 +358,9 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
         last = now;
         return;
       }
+      // Quiet and settled: wake about 30 times a second instead of 60.
+      if (!lively && now - lastWork < 30) return;
+      lastWork = now;
       const dt = Math.min(0.05, (now - last) / 1000 || 0);
       last = now;
 
@@ -292,18 +373,25 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
           btn.style.display = 'none';
           return;
         }
-        const composer = pane?.querySelector('[data-promptbox]')?.getBoundingClientRect();
+        const composerEl = pane?.querySelector('[data-promptbox]') ?? null;
+        if (composerEl !== boxed) {
+          boxWatcher.disconnect();
+          boxed = composerEl;
+          if (composerEl) boxWatcher.observe(composerEl);
+        }
+        const composer = composerEl?.getBoundingClientRect();
         // Watch the reply text grow, to tell talking from thinking.
         const thread = pane?.querySelector('[data-thread-window]') ?? null;
         if (thread !== watched) {
+          watcher.disconnect();
           watched = thread;
-          textLength = thread?.textContent?.length ?? 0;
+          if (thread) watcher.observe(thread, { childList: true, characterData: true, characterDataOldValue: true, subtree: true });
         }
-        // Reading the whole transcript is costly; only needed while it's working.
-        if (busy.current) {
-          const length = thread?.textContent?.length ?? 0;
-          if (length > textLength + 2) grewAt = now;
-          textLength = length;
+        // localStorage 'bc-debug-mood' forces a mood, for screenshots and testing.
+        try {
+          forced = localStorage.getItem('bc-debug-mood');
+        } catch {
+          forced = null;
         }
         world = {
           bounds: { left: Math.max(0, r.left) + 4, top: Math.max(0, r.top) + 52, right: Math.min(innerWidth, r.right) - 4, bottom: Math.min(innerHeight, r.bottom) - 2 },
@@ -333,22 +421,69 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
       }
 
       // Mood: what the chat (and you) are doing right now.
-      // localStorage 'bc-debug-mood' forces a mood, for screenshots and testing.
-      let forced: string | null = null;
-      try {
-        forced = localStorage.getItem('bc-debug-mood');
-      } catch {
-        // Private mode.
-      }
-      const mood: Mood = forced === 'thinking' || forced === 'talking' ? forced : body.held
+      const isBusy = busy.current;
+      // A turn ending: ask once how it went, then react for a moment.
+      if (prevBusy && !isBusy) {
+        outcome = { at: now, turn: 'none' };
+        const mine = outcome;
+        rpc.call('activity', { threadId }).then(
+          (v) => {
+            mine.turn = v.turn;
+            if (v.context !== null) live.context = v.context;
+          },
+          () => {},
+        );
+        live.queued = 0;
+        live.failed = 0;
+        work = { kind: null, until: 0 };
+      } else if (!prevBusy && isBusy) outcome = null;
+      prevBusy = isBusy;
+      const stress = isBusy ? Math.min(3, live.failed) : 0;
+      if (lastStress > 0 && stress === 0 && isBusy) reliefUntil = now + 1400;
+      lastStress = stress;
+      if (live.queued < lastQueued) chewUntil = now + 800;
+      lastQueued = live.queued;
+      const pending = info.current.pending;
+      const working = isBusy && now < work.until;
+      const ended = outcome && now - outcome.at < 2800 ? outcome.turn : 'none';
+      // Mood: what the chat (and you) are doing right now.
+      const awake: Mood = forced === 'thinking' || forced === 'talking' ? forced : body.held
         ? 'held'
-        : busy.current && now - grewAt < 600
-          ? 'talking'
-          : busy.current
-            ? 'thinking'
-            : now - typedAt < 1500
-              ? 'watching'
-              : 'idle';
+        : pending
+          ? 'needs'
+          : working
+            ? 'working'
+            : isBusy && now - grewAt < 600
+              ? 'talking'
+              : isBusy
+                ? 'thinking'
+                : ended === 'ok'
+                  ? 'done'
+                  : ended === 'failed'
+                    ? 'failed'
+                    : now - typedAt < 1500
+                      ? 'watching'
+                      : 'idle';
+      // After a while with nothing going on it dozes off (sooner at night).
+      if (awake !== 'idle' || ui.down || now < ui.greet) lastActive = now;
+      const hour = new Date().getHours();
+      const mood: Mood = awake === 'idle' && now - lastActive > (hour >= 23 || hour < 6 ? 120000 : 360000) ? 'sleeping' : awake;
+      if (prevMood === 'sleeping' && mood !== 'sleeping') wakeUntil = now + 700;
+      if (mood !== prevMood) {
+        if (mood === 'done') body.impulse(0, -340 * k);
+        prevMood = mood;
+      }
+      if (mood === 'needs' && now >= nextHop && body.grounded) {
+        body.impulse(0, -260 * k);
+        nextHop = now + 1500;
+      }
+      if (mood === 'working' && stress >= 3 && now >= nextShake) {
+        body.impulse((Math.random() - 0.5) * 160 * k, -60 * k);
+        nextShake = now + 900;
+      }
+      // Friends nearby: sub-threads of this chat and other bots that are busy right now.
+      const guests = isBusy || pending ? friendsRef.current.filter((f) => f.id !== bot.id && f.mainThreadId && info.current.busyIds.has(f.mainThreadId)).slice(0, 3) : [];
+      const helpers = Math.min(3, info.current.helpers);
       // Talking: a syllable rhythm (two beating waves) drives the mouth and
       // a little pulse through the body.
       const talk = mood === 'talking' ? Math.max(0, Math.sin(now / 85) * 0.6 + Math.sin(now / 211) * 0.5 + 0.15) : 0;
@@ -356,7 +491,12 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
       const breath = Math.sin(now / 950);
       body.restScale = still
         ? 1
-        : 1 + (mood === 'idle' || mood === 'watching' ? 0.01 : 0.016) * breath + Math.min(1, talk) * 0.05;
+        : 1 + (mood === 'idle' || mood === 'watching' ? 0.01 : 0.016) * breath + Math.min(1, talk) * 0.05 + (mood === 'working' ? 0.018 * Math.sin(now / 130) : 0);
+      if (!still) {
+        if (mood === 'failed') body.restScale *= 0.94;
+        else if (mood === 'sleeping') body.restScale = 1 + 0.025 * Math.sin(now / 1500);
+        else if (now < wakeUntil) body.restScale += 0.05;
+      }
       const v = body.velocity();
       const speed = Math.hypot(v.vx, v.vy);
       if (now < ui.greet) {
@@ -378,6 +518,7 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
         exprUntil = now + 1200 + Math.random() * 2200;
       }
       if (now < ui.greet) expr = 'happy';
+      if (now < wakeUntil) expr = 'wide';
 
       // Physics at a fixed step, however fast the screen refreshes.
       acc = Math.min(acc + dt, STEP * 8);
@@ -407,7 +548,7 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
       // Draw: drops, body, face — all on the same screen-fixed block grid.
       // Lively moments draw at up to 60 fps, quiet ones at 30; physics keeps
       // its fixed step either way.
-      const lively = body.held || !body.grounded || body.drops.length > 0 || mood === 'talking' || ui.down || now < ui.greet;
+      lively = body.held || !body.grounded || body.drops.length > 0 || mood === 'talking' || mood === 'working' || mood === 'needs' || mood === 'done' || mood === 'failed' || guests.length > 0 || helpers > 0 || live.queued > 0 || now < chewUntil || ui.down || now < ui.greet;
       if (now - lastDraw >= (lively ? 15 : 32)) {
         lastDraw = now;
         const ratio = devicePixelRatio || 1;
@@ -416,7 +557,20 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
         drawDrops(r, body.drops, bot.avatar.color);
         drawBody(r, body, bot.avatar.color, world.solids);
         const gaze = mood === 'watching' ? caret : look;
-        drawFace(r, bot, body, { mood, expr: now < blinkUntil && mood !== 'held' ? 'blink' : expr, gaze, talk: Math.min(1, talk), now });
+        drawFace(r, bot, body, { mood, expr: now < blinkUntil && mood !== 'held' ? 'blink' : expr, gaze, talk: Math.min(1, talk), now, work: mood === 'working' ? work.kind : null, stress, relief: now < reliefUntil, context: live.context, queued: live.queued, chewing: now < chewUntil, waking: now < wakeUntil });
+        // Visitors walk in from the right; this chat's own sub-threads stand on the left.
+        const room = world.bounds;
+        const baseY = (world.solids[0]?.top ?? room.bottom) - 3;
+        const present = new Set(guests.map((f) => f.id));
+        for (const id of arrived.keys()) if (!present.has(id)) arrived.delete(id);
+        guests.forEach((f, i) => {
+          if (!arrived.has(f.id)) arrived.set(f.id, now);
+          const walk = Math.min(1, (now - (arrived.get(f.id) ?? now)) / 1200);
+          const target = room.right - (24 + i * 30) * k;
+          const x = target + (1 - walk) ** 2 * (room.right + 20 * k - target);
+          drawMini(r, x, baseY, f.shape, f.color, k, now, i * 1.7, walk < 1 || isBusy);
+        });
+        for (let i = 0; i < helpers; i++) drawMini(r, room.left + (24 + i * 30) * k, baseY, bot.avatar.shape, bot.avatar.color, k, now, i * 2.3, true);
         // Only the companion's own area, clipped to the pane, in device pixels.
         const b = world.bounds;
         const L = Math.floor((Math.max(rec.left, b.left) * ratio) / TILE) * TILE;
@@ -471,13 +625,16 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
     raf = requestAnimationFrame(loop);
     return () => {
       cancelAnimationFrame(raf);
+      clearInterval(workTimer);
+      watcher.disconnect();
+      boxWatcher.disconnect();
       window.removeEventListener('pointermove', onLook);
       document.removeEventListener('input', onType, true);
       document.removeEventListener('keyup', onType, true);
       canvas.remove();
       bodyRef.current = null;
     };
-  }, [bot, shown, off, threadId, scale]);
+  }, [rpc, bot, shown, off, threadId, scale]);
 
   if (!bot || off) return null;
   const ui = input.current;
