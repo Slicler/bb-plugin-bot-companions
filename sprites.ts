@@ -69,6 +69,18 @@ export function drawBody(ctx: CanvasRenderingContext2D, body: SoftBody, color: s
   const OFF = 0.33;
   const was = body.cells;
   const now = new Set<number>();
+  // Only links stretched past their rest length draw strands, so find them once
+  // per frame instead of for every empty cell.
+  const near = body.spacing * body.spacing;
+  const strands: { ax: number; ay: number; sx: number; sy: number; len2: number }[] = [];
+  for (const [i, j] of body.links) {
+    const a = ps[i];
+    const b = ps[j];
+    const sx = b.x - a.x;
+    const sy = b.y - a.y;
+    const len2 = sx * sx + sy * sy;
+    if (len2 >= near * 1.6 && len2 <= near * 36) strands.push({ ax: a.x, ay: a.y, sx, sy, len2 });
+  }
   ctx.fillStyle = color;
   ctx.beginPath();
   for (let iy = y0; iy <= y1; iy++) {
@@ -88,16 +100,10 @@ export function drawBody(ctx: CanvasRenderingContext2D, body: SoftBody, color: s
       // Strands between neighbours keep a stretched body continuous (until
       // it actually tears).
       if (field < ON) {
-        for (const [i, j] of body.links) {
-          const a = ps[i];
-          const b = ps[j];
-          const sx = b.x - a.x;
-          const sy = b.y - a.y;
-          const len2 = sx * sx + sy * sy;
-          if (len2 < body.spacing * body.spacing * 1.6 || len2 > body.spacing * body.spacing * 36) continue;
-          const t = Math.max(0, Math.min(1, ((cx - a.x) * sx + (cy - a.y) * sy) / len2));
-          const dx = cx - (a.x + sx * t);
-          const dy = cy - (a.y + sy * t);
+        for (const l of strands) {
+          const t = Math.max(0, Math.min(1, ((cx - l.ax) * l.sx + (cy - l.ay) * l.sy) / l.len2));
+          const dx = cx - (l.ax + l.sx * t);
+          const dy = cy - (l.ay + l.sy * t);
           const d2 = dx * dx + dy * dy;
           if (d2 >= R2) continue;
           const f = 1 - d2 / R2;
@@ -289,3 +295,4 @@ export function drawFace(ctx: CanvasRenderingContext2D, bot: Bot, body: SoftBody
     ctx.globalAlpha = 1;
   }
 }
+

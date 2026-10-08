@@ -635,9 +635,10 @@ function collide(p: { x: number; y: number; px: number; py: number }, world: Wor
     else if (fromLeft) p.px = s.left - r;
     else if (fromRight) p.px = s.right + r;
     else {
+      // Caught inside a solid that moved onto it (the message box growing):
+      // the companion lives above the box, so never eject it out the bottom.
       const options = [
         { d: p.py - (s.top - r), apply: () => (p.py = s.top - r) },
-        { d: s.bottom + r - p.py, apply: () => (p.py = s.bottom + r) },
         { d: p.px - (s.left - r), apply: () => (p.px = s.left - r) },
         { d: s.right + r - p.px, apply: () => (p.px = s.right + r) },
       ].sort((m, k) => m.d - k.d);

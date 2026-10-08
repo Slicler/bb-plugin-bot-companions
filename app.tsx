@@ -192,7 +192,9 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
       if (document.hidden) return;
       rpc.call('owner', { threadId, projectId }).then(
         (v) => live && setBot((old) => (JSON.stringify(old) === JSON.stringify(v) ? old : v)),
-        () => live && setBot(null),
+        () => {
+          // A failed lookup keeps the bot it already has; only a real "no owner" answer removes it.
+        },
       );
     };
     refresh();
@@ -223,6 +225,8 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
     let place = '';
     let actorBox = '';
     let lastDraw = 0;
+    let lastWork = 0;
+    let lively = false;
     let raf = 0;
     let last = 0;
     let acc = 0;
@@ -240,8 +244,26 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
     let typedAt = 0;
     let caret: { x: number; y: number } | null = null;
     let grewAt = 0;
-    let textLength = 0;
     let watched: Element | null = null;
+    // The message box grows and shrinks as you click in and type: re-measure
+    // on the very next frame so the body never sits inside a box that moved.
+    let boxed: Element | null = null;
+    const boxWatcher = new ResizeObserver(() => (nextMeasure = 0));
+    let forced: string | null = null;
+    // Watch the reply grow without reading the whole transcript: only the nodes
+    // that were added or removed are measured, and only while the chat is working.
+    const watcher = new MutationObserver((records) => {
+      if (!busy.current) return;
+      let grown = 0;
+      for (const m of records) {
+        if (m.type === 'characterData') grown += (m.target.nodeValue?.length ?? 0) - (m.oldValue?.length ?? 0);
+        else {
+          m.addedNodes.forEach((n) => (grown += n.textContent?.length ?? 0));
+          m.removedNodes.forEach((n) => (grown -= n.textContent?.length ?? 0));
+        }
+      }
+      if (grown > 2) grewAt = performance.now();
+    });
     const onType = (e: Event) => {
       const t = e.target instanceof Element ? e.target : null;
       const box = t?.closest('[data-promptbox]');
@@ -280,6 +302,9 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
         last = now;
         return;
       }
+      // Quiet and settled: wake about 30 times a second instead of 60.
+      if (!lively && now - lastWork < 30) return;
+      lastWork = now;
       const dt = Math.min(0.05, (now - last) / 1000 || 0);
       last = now;
 
@@ -292,18 +317,25 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
           btn.style.display = 'none';
           return;
         }
-        const composer = pane?.querySelector('[data-promptbox]')?.getBoundingClientRect();
+        const composerEl = pane?.querySelector('[data-promptbox]') ?? null;
+        if (composerEl !== boxed) {
+          boxWatcher.disconnect();
+          boxed = composerEl;
+          if (composerEl) boxWatcher.observe(composerEl);
+        }
+        const composer = composerEl?.getBoundingClientRect();
         // Watch the reply text grow, to tell talking from thinking.
         const thread = pane?.querySelector('[data-thread-window]') ?? null;
         if (thread !== watched) {
+          watcher.disconnect();
           watched = thread;
-          textLength = thread?.textContent?.length ?? 0;
+          if (thread) watcher.observe(thread, { childList: true, characterData: true, characterDataOldValue: true, subtree: true });
         }
-        // Reading the whole transcript is costly; only needed while it's working.
-        if (busy.current) {
-          const length = thread?.textContent?.length ?? 0;
-          if (length > textLength + 2) grewAt = now;
-          textLength = length;
+        // localStorage 'bc-debug-mood' forces a mood, for screenshots and testing.
+        try {
+          forced = localStorage.getItem('bc-debug-mood');
+        } catch {
+          forced = null;
         }
         world = {
           bounds: { left: Math.max(0, r.left) + 4, top: Math.max(0, r.top) + 52, right: Math.min(innerWidth, r.right) - 4, bottom: Math.min(innerHeight, r.bottom) - 2 },
@@ -333,13 +365,6 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
       }
 
       // Mood: what the chat (and you) are doing right now.
-      // localStorage 'bc-debug-mood' forces a mood, for screenshots and testing.
-      let forced: string | null = null;
-      try {
-        forced = localStorage.getItem('bc-debug-mood');
-      } catch {
-        // Private mode.
-      }
       const mood: Mood = forced === 'thinking' || forced === 'talking' ? forced : body.held
         ? 'held'
         : busy.current && now - grewAt < 600
@@ -407,7 +432,7 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
       // Draw: drops, body, face — all on the same screen-fixed block grid.
       // Lively moments draw at up to 60 fps, quiet ones at 30; physics keeps
       // its fixed step either way.
-      const lively = body.held || !body.grounded || body.drops.length > 0 || mood === 'talking' || ui.down || now < ui.greet;
+      lively = body.held || !body.grounded || body.drops.length > 0 || mood === 'talking' || ui.down || now < ui.greet;
       if (now - lastDraw >= (lively ? 15 : 32)) {
         lastDraw = now;
         const ratio = devicePixelRatio || 1;
@@ -471,6 +496,8 @@ function Companion({ threadId, projectId }: { threadId: string; projectId: strin
     raf = requestAnimationFrame(loop);
     return () => {
       cancelAnimationFrame(raf);
+      watcher.disconnect();
+      boxWatcher.disconnect();
       window.removeEventListener('pointermove', onLook);
       document.removeEventListener('input', onType, true);
       document.removeEventListener('keyup', onType, true);

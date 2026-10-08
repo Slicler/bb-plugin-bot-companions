@@ -2,15 +2,24 @@ import { defineRpcContract, type BbPluginApi } from '@get-bb/plugin-sdk';
 import { z } from 'zod';
 const avatar = z.object({ color: z.string().regex(/^#[\da-f]{6}$/i), shape: z.string(), expression: z.string(), motion: z.string() });
 const bot = z.object({ id: z.string(), name: z.string(), avatar, mainThreadId: z.string().nullable() });
-const registry = z.object({ bots: z.array(bot), threadBindings: z.array(z.object({threadId:z.string(),botId:z.string()})), projectOwners: z.array(z.object({projectId:z.string(),botId:z.string()})).optional() });
+// Bots are parsed one by one, so a single odd avatar can't blank every companion.
+const registry = z.object({ bots: z.array(z.unknown()), threadBindings: z.array(z.object({threadId:z.string(),botId:z.string()})), projectOwners: z.array(z.object({projectId:z.string(),botId:z.string()})).optional() });
 export const rpcContract = defineRpcContract({ owner: { input: z.object({threadId:z.string(),projectId:z.string().nullable()}), output: bot.nullable() } });
 export type Bot = z.infer<typeof bot>;
 export default function plugin(bb: BbPluginApi) {
-  let cached: z.infer<typeof registry> | null = null, expires = 0;
-  let pending: Promise<z.infer<typeof registry>> | null = null;
+  type Registry = { bots: Bot[]; threadBindings: { threadId: string; botId: string }[]; projectOwners?: { projectId: string; botId: string }[] };
+  let cached: Registry | null = null, expires = 0;
+  let pending: Promise<Registry> | null = null;
+  const load = async (): Promise<Registry> => {
+    const raw = await bb.sdk.plugins.callRpc({pluginId:'bots-sidebar',method:'bots_list',input:null,outputSchema:registry});
+    return { ...raw, bots: raw.bots.flatMap(b => { const p = bot.safeParse(b); return p.success ? [p.data] : []; }) };
+  };
   const read = async () => {
     if (cached && Date.now() < expires) return cached;
-    if (!pending) pending = bb.sdk.plugins.callRpc({pluginId:'bots-sidebar',method:'bots_list',input:null,outputSchema:registry}).then(value => { cached=value; expires=Date.now()+5000; return value; }).finally(()=>{pending=null;});
+    if (!pending) pending = load().then(value => { cached=value; expires=Date.now()+5000; return value; })
+      // Keep serving the last good list if the bots plugin hiccups.
+      .catch(err => { if (cached) { expires = Date.now() + 2000; return cached; } throw err; })
+      .finally(()=>{pending=null;});
     return pending;
   };
   bb.rpc.register(rpcContract, { owner: async ({threadId,projectId}) => {
