@@ -21,10 +21,10 @@ Little pixel-block versions of your [bb](https://getbb.app) bots that live in th
 ## Install
 
 ```sh
-bb plugin install github:Slicler/bb-plugin-bot-companions
+bb plugin install git:https://github.com/Slicler/bb-plugin-bot-companions.git
 ```
 
-Or clone it and run `bb plugin install .` from the folder.
+Or clone it and run `bb plugin install .` from the folder. Installing from Git builds the plugin for you.
 
 ## Power use
 
